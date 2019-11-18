@@ -45,11 +45,15 @@ class Agent:
             [-1, 0]
         ], dtype=np.float32)
         self.epsilon = 1
-        self.delta = 0.0001
+        self.delta = 0.00002
+        # Periodically inspect the network optimal policy
         self.evaluation_mode = False
-        self.greedy_works = False
+        # When greedy policy works save it
+        self.snapshot_manager = NetworkGreedyPolicySnapshotManager()
+        self.optimal_policy_loaded = False
+
         # debug flag
-        self.debug = True
+        self.debug = False
 
     # Function to check whether the agent has reached the end of an episode
     def has_finished_episode(self):
@@ -80,9 +84,9 @@ class Agent:
 
         # Evaluate the policy
         if self.evaluation_mode:
-            return self.get_greedy_action(state)
+            return self.get_greedy_action_for_evaluation(state)
 
-        if self.num_steps_taken > 2500 and self.num_steps_taken % 1000 == 0:
+        if self.num_steps_taken > 10000 and self.num_steps_taken % 5000 == 0:
             self.decrease_episode_length(delta=25)
 
         # Store the state; this will be used later, when storing the transition
@@ -99,22 +103,26 @@ class Agent:
     def set_next_state_and_distance(self, next_state, distance_to_goal):
         # Don't train the network when evaluating it
         if self.evaluation_mode:
-            if self.debug:
-                if distance_to_goal < 0.03 and not self.greedy_works:
-                    self.greedy_works = True
-                    print('Greedy policy works! Reached goal in {} steps.'.format(
-                        self.num_steps_taken % self.episode_length
-                    ))
+            if distance_to_goal < 0.03:
+                steps = self.num_steps_taken % self.episode_length
+                steps_taken = steps if steps != 0 else self.episode_length
+                if steps_taken < self.snapshot_manager.get_min_steps_to_goal():
+                    weights = self.dqn.q_network.state_dict()
+                    self.snapshot_manager.preserve_weights(
+                        num_steps=steps_taken,
+                        weights=weights
+                    )
 
+                    if self.debug:
+                        print('Greedy policy works! Reached goal in {} steps.'.format(
+                            steps_taken
+                        ))
             return
 
         # Convert the distance to a reward
         reward = self.calculate_reward(next_state, distance_to_goal)
         # Create a transition
         transition = (self.state, self.action, reward, next_state)
-
-        if self.greedy_works:
-            return
 
         # Add transition to the buffer
         self.dqn.replay_buffer.add(transition)
@@ -141,6 +149,19 @@ class Agent:
 
     # Function to get the greedy action for a particular state
     def get_greedy_action(self, state):
+        if not self.optimal_policy_loaded:
+            optimal_weights = self.snapshot_manager.get_optimal_weights()
+            self.dqn.q_network.load_state_dict(optimal_weights)
+            self.optimal_policy_loaded = True
+
+        action_rewards = self.dqn.q_network.forward(
+            torch.tensor(state)
+        ).detach().numpy()
+        discrete_action = np.argmax(action_rewards)
+        return self._discrete_action_to_continuous(discrete_action)
+
+    # Function to get the greedy action for a particular state when evaluating stuff
+    def get_greedy_action_for_evaluation(self, state):
         action_rewards = self.dqn.q_network.forward(
             torch.tensor(state)
         ).detach().numpy()
@@ -170,11 +191,11 @@ class Agent:
     def _should_evaluate_policy(self):
         return all([
             self.episode_length == 100,
-            self.num_steps_taken > 8000,
+            self.num_steps_taken > 15000,
             self.num_steps_taken % 500 == 0
         ])
 
- # The Network class inherits the torch.nn.Module class, which represents a neural network.
+# The Network class inherits the torch.nn.Module class, which represents a neural network.
 
 
 class Network(torch.nn.Module):
@@ -292,3 +313,21 @@ class ReplayBuffer:
         states_prime = np.array(states_prime, dtype=np.float32)
 
         return states, actions, rewards, states_prime
+
+
+# Takes care to save the weights when network reaches goal with minimal amount of steps
+class NetworkGreedyPolicySnapshotManager:
+    def __init__(self):
+        self.min_steps_to_goal = 100
+        self.weights = None
+
+    def preserve_weights(self, num_steps, weights):
+        if num_steps < self.min_steps_to_goal:
+            self.min_steps_to_goal = num_steps
+            self.weights = weights
+
+    def get_optimal_weights(self):
+        return self.weights
+
+    def get_min_steps_to_goal(self):
+        return self.min_steps_to_goal
