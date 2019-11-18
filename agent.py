@@ -26,7 +26,7 @@ class Agent:
     # Function to initialise the agent
     def __init__(self):
         # Set the episode length (you will need to increase this)
-        self.episode_length = 20
+        self.episode_length = 250
         # Reset the total number of steps which the agent has taken
         self.num_steps_taken = 0
         # The state variable stores the latest state of the agent in the environment
@@ -34,6 +34,16 @@ class Agent:
         # The action variable stores the latest action which the agent has applied to the environment
         self.action = None
         self.dqn = DQN()
+        self.action_space = np.array([0, 1, 2, 3])
+        self.step_size = 0.02
+        self.continuous_actions = self.step_size * np.array([
+            [0, 1],
+            [1, 0],
+            [0, -1],
+            [-1, 0]
+        ], dtype=np.float32)
+        self.epsilon = 1
+        self.delta = 0.0001
 
     # Function to check whether the agent has reached the end of an episode
     def has_finished_episode(self):
@@ -44,31 +54,70 @@ class Agent:
 
     # Function to get the next action, using whatever method you like
     def get_next_action(self, state):
-        # Here, the action is random, but you can change this
-        action = np.random.uniform(
-            low=-0.01, high=0.01, size=2).astype(np.float32)
         # Update the number of steps which the agent has taken
         self.num_steps_taken += 1
         # Store the state; this will be used later, when storing the transition
         self.state = state
+        # Here, the action is random, but you can change this
+        action = self.e_greedy_action()
+        # Get the continuous action
+        continuous_action = self._discrete_action_to_continuous(action)
         # Store the action; this will be used later, when storing the transition
         self.action = action
-        return action
+        return continuous_action
 
     # Function to set the next state and distance, which resulted from applying action self.action at state self.state
     def set_next_state_and_distance(self, next_state, distance_to_goal):
         # Convert the distance to a reward
-        reward = 1 - distance_to_goal
+        reward = self.calculate_reward(next_state, distance_to_goal)
         # Create a transition
         transition = (self.state, self.action, reward, next_state)
-        # Now you can do something with this transition ...
+        # Add transition to the buffer
+        self.dqn.replay_buffer.add(transition)
+        if self.dqn.replay_buffer.is_big_enough():
+            self.dqn.train_q_network()
+            self.epsilon -= self.delta
+
+        # Update target network every 50th step
+        if self.num_steps_taken % 50 == 0:
+            self.dqn.update_target_network()
+
+    def calculate_reward(self, next_state, distance_to_goal):
+        reward = 1 - distance_to_goal
+        if distance_to_goal <= 0.2:
+            reward *= 3
+        elif distance_to_goal <= 0.3:
+            reward *= 2
+        elif distance_to_goal <= 0.5:
+            reward *= 1.5
+
+        if not np.any(self.state - next_state):
+            reward /= 1.5
+        return reward
 
     # Function to get the greedy action for a particular state
-
     def get_greedy_action(self, state):
-        # Here, the greedy action is fixed, but you should change it so that it returns the action with the highest Q-value
-        action = np.array([0.02, 0.0], dtype=np.float32)
-        return action
+        action_rewards = self.dqn.q_network.forward(
+            torch.tensor(state)
+        ).detach().numpy()
+        discrete_action = np.argmax(action_rewards)
+        return self._discrete_action_to_continuous(discrete_action)
+
+    def random_action(self):
+        return self.action_space[np.random.randint(low=0, high=3)]
+
+    def e_greedy_action(self):
+        action_rewards = self.dqn.q_network.forward(
+            torch.tensor(self.state)
+        ).detach().numpy()
+        prob = np.random.uniform(low=0.0, high=1.0)
+        if prob < self.epsilon:
+            return self.random_action()
+        else:
+            return np.argmax(action_rewards)
+
+    def _discrete_action_to_continuous(self, discrete_action):
+        return self.continuous_actions[discrete_action]
 
 
 # The Network class inherits the torch.nn.Module class, which represents a neural network.
@@ -102,7 +151,7 @@ class DQN:
         self.q_network = Network(input_dimension=2, output_dimension=4)
         # Define the optimiser which is used when updating the Q-network. The learning rate determines how big each gradient step is during backpropagation.
         self.optimiser = torch.optim.Adam(
-            self.q_network.parameters(), lr=0.001)
+            self.q_network.parameters(), lr=0.005)
         # Replay buffer
         self.replay_buffer = ReplayBuffer()
         # Target network
@@ -152,8 +201,8 @@ class DQN:
 class ReplayBuffer:
 
     def __init__(self):
-        self.buffer = collections.deque(maxlen=1000000)
-        self.sample_size = 50
+        self.buffer = collections.deque(maxlen=10000)
+        self.sample_size = 200
 
     def size(self):
         return len(self.buffer)
