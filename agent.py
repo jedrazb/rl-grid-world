@@ -31,6 +31,8 @@ class Agent:
         self.num_steps_taken = 0
         # The state variable stores the latest state of the agent in the environment
         self.state = None
+        # Store the initial state of the agent
+        self.init_state = None
         # The action variable stores the latest action which the agent has applied to the environment
         self.action = None
         self.dqn = DQN()
@@ -44,18 +46,45 @@ class Agent:
         ], dtype=np.float32)
         self.epsilon = 1
         self.delta = 0.0001
+        self.evaluation_mode = False
+        self.greedy_works = False
+        # debug flag
+        self.debug = True
 
     # Function to check whether the agent has reached the end of an episode
     def has_finished_episode(self):
         if self.num_steps_taken % self.episode_length == 0:
+            # Make sure you finish the evaluation
+            self.evaluation_mode = False
             return True
         else:
             return False
 
     # Function to get the next action, using whatever method you like
     def get_next_action(self, state):
+        # Some debug info
+        if self.debug:
+            if self.num_steps_taken % 1000 == 0:
+                print('Steps: {}, epsilon: {}, episode length: {}'.format(
+                    self.num_steps_taken,
+                    self.epsilon,
+                    self.episode_length
+                ))
+
+        # Periodically evaluate the policy
+        if self._should_evaluate_policy():
+            self.evaluation_mode = True
+
         # Update the number of steps which the agent has taken
         self.num_steps_taken += 1
+
+        # Evaluate the policy
+        if self.evaluation_mode:
+            return self.get_greedy_action(state)
+
+        if self.num_steps_taken > 2500 and self.num_steps_taken % 1000 == 0:
+            self.decrease_episode_length(delta=25)
+
         # Store the state; this will be used later, when storing the transition
         self.state = state
         # Here, the action is random, but you can change this
@@ -68,15 +97,30 @@ class Agent:
 
     # Function to set the next state and distance, which resulted from applying action self.action at state self.state
     def set_next_state_and_distance(self, next_state, distance_to_goal):
+        # Don't train the network when evaluating it
+        if self.evaluation_mode:
+            if self.debug:
+                if distance_to_goal < 0.03 and not self.greedy_works:
+                    self.greedy_works = True
+                    print('Greedy policy works! Reached goal in {} steps.'.format(
+                        self.num_steps_taken % self.episode_length
+                    ))
+
+            return
+
         # Convert the distance to a reward
         reward = self.calculate_reward(next_state, distance_to_goal)
         # Create a transition
         transition = (self.state, self.action, reward, next_state)
+
+        if self.greedy_works:
+            return
+
         # Add transition to the buffer
         self.dqn.replay_buffer.add(transition)
         if self.dqn.replay_buffer.is_big_enough():
             self.dqn.train_q_network()
-            self.epsilon -= self.delta
+            self.epsilon = max(self.epsilon-self.delta, 0.1)
 
         # Update target network every 50th step
         if self.num_steps_taken % 50 == 0:
@@ -119,8 +163,20 @@ class Agent:
     def _discrete_action_to_continuous(self, discrete_action):
         return self.continuous_actions[discrete_action]
 
+    def decrease_episode_length(self, delta=50):
+        if self.episode_length > 100:
+            self.episode_length -= delta
 
-# The Network class inherits the torch.nn.Module class, which represents a neural network.
+    def _should_evaluate_policy(self):
+        return all([
+            self.episode_length == 100,
+            self.num_steps_taken > 8000,
+            self.num_steps_taken % 500 == 0
+        ])
+
+ # The Network class inherits the torch.nn.Module class, which represents a neural network.
+
+
 class Network(torch.nn.Module):
 
     # The class initialisation function. This takes as arguments the dimension of the network's input (i.e. the dimension of the state), and the dimension of the network's output (i.e. the dimension of the action).
