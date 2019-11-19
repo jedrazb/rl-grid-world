@@ -38,16 +38,14 @@ class Agent:
         # The action variable stores the latest action which the agent has applied to the environment
         self.action = None
         self.dqn = DQN()
-        self.action_space = np.array([0, 1, 2, 3])
+        # Action is expressed in radians, step size constant
+        # to minimize the steps taken to reach the goal
         self.step_size = 0.02
-        self.continuous_actions = self.step_size * np.array([
-            [0, 1],
-            [1, 0],
-            [0, -1],
-            [-1, 0]
-        ], dtype=np.float32)
+        self.action_space_start = 0
+        self.action_space_end = 2 * np.pi
+        # Parameters for epsilon-greedy exploration
         self.epsilon = 1
-        self.delta = 0.000015
+        self.delta = 0.0002
         # Periodically inspect the network optimal policy
         self.evaluation_mode = False
         # When greedy policy works save it
@@ -55,7 +53,7 @@ class Agent:
         self.optimal_policy_loaded = False
 
         # debug flag
-        self.debug = False
+        self.debug = True
 
     # Function to check whether the agent has reached the end of an episode
     def has_finished_episode(self):
@@ -71,7 +69,7 @@ class Agent:
     def get_next_action(self, state):
         # Some debug info
         if self.debug:
-            if self.num_steps_taken % 1000 == 0:
+            if self.num_steps_taken % 500 == 0:
                 print('Steps: {}, epsilon: {}, episode length: {}'.format(
                     self.num_steps_taken,
                     self.epsilon,
@@ -89,18 +87,18 @@ class Agent:
         if self.evaluation_mode:
             return self.get_greedy_action_for_evaluation(state)
 
-        if self.num_steps_taken > 10000 and self.episodes % 50 == 0:
-            self.decrease_episode_length(delta=25)
+        if self.num_steps_taken > 2000 and self.episodes % 20 == 0:
+            self._decrease_episode_length(delta=50)
 
         # Store the state; this will be used later, when storing the transition
         self.state = state
         # Here, the action is random, but you can change this
         action = self.e_greedy_action()
         # Get the continuous action
-        continuous_action = self._discrete_action_to_continuous(action)
+        cartesian_action = self._action_to_cartesian(action)
         # Store the action; this will be used later, when storing the transition
         self.action = action
-        return continuous_action
+        return cartesian_action
 
     # Function to set the next state and distance, which resulted from applying action self.action at state self.state
     def set_next_state_and_distance(self, next_state, distance_to_goal):
@@ -115,6 +113,7 @@ class Agent:
                         num_steps=steps_taken,
                         weights=weights
                     )
+                    # if self.debug:
                     print('Greedy policy works! Reached goal in {} steps.'.format(
                         steps_taken
                     ))
@@ -132,7 +131,7 @@ class Agent:
             self.epsilon = max(self.epsilon-self.delta, 0.15)
 
         # Update target network every 50th step
-        if self.num_steps_taken % 50 == 0:
+        if self.num_steps_taken % 100 == 0:
             self.dqn.update_target_network()
 
     def calculate_reward(self, next_state, distance_to_goal):
@@ -150,54 +149,52 @@ class Agent:
 
     # Function to get the greedy action for a particular state
     def get_greedy_action(self, state):
-        self._load_snapshot_state()
+        if not self.optimal_policy_loaded:
+            optimal_weights = self.snapshot_manager.get_optimal_weights()
+            self.dqn.q_network.load_state_dict(optimal_weights)
+            self.optimal_policy_loaded = True
 
-        action_rewards = self.dqn.q_network.forward(
-            torch.tensor(state)
-        ).detach().numpy()
-        discrete_action = np.argmax(action_rewards)
-        return self._discrete_action_to_continuous(discrete_action)
+        best_action = self.dqn.find_best_action(state)
+        return self._action_to_cartesian(best_action)
 
     # Function to get the greedy action for a particular state when evaluating stuff
     def get_greedy_action_for_evaluation(self, state):
-        action_rewards = self.dqn.q_network.forward(
-            torch.tensor(state)
-        ).detach().numpy()
-        discrete_action = np.argmax(action_rewards)
-        return self._discrete_action_to_continuous(discrete_action)
+        best_action = self.dqn.find_best_action(state)
+        return self._action_to_cartesian(best_action)
 
     def random_action(self):
-        return self.action_space[np.random.randint(low=0, high=3)]
+        return np.random.uniform(
+            low=self.action_space_start,
+            high=self.action_space_end
+        )
 
     def e_greedy_action(self):
-        action_rewards = self.dqn.q_network.forward(
-            torch.tensor(self.state)
-        ).detach().numpy()
+        best_action = self.dqn.find_best_action(self.state)
         prob = np.random.uniform(low=0.0, high=1.0)
         if prob < self.epsilon:
             return self.random_action()
         else:
-            return np.argmax(action_rewards)
+            return best_action
 
-    def _discrete_action_to_continuous(self, discrete_action):
-        return self.continuous_actions[discrete_action]
+    def _action_to_cartesian(self, action):
+        radians = action
+        x = np.cos(radians)
+        y = np.sin(radians)
+        return np.array([x, y], dtype=np.float32) * self.step_size
 
-    def decrease_episode_length(self, delta=50):
+    def _cartesian_to_action(self, cartesian):
+        return np.arctan2(cartesian[1], cartesian[0])
+
+    def _decrease_episode_length(self, delta=50):
         if self.episode_length > 100:
             self.episode_length -= delta
 
     def _should_evaluate_policy(self):
         return all([
             self.episode_length == 100,
-            self.num_steps_taken > 15000,
-            self.episodes % 10 == 0
+            self.num_steps_taken > 2500,
+            self.episodes % 5 == 0
         ])
-
-    def _load_snapshot_state(self):
-        if not self.optimal_policy_loaded and self.snapshot_manager.stores_snapshot():
-            optimal_weights = self.snapshot_manager.get_optimal_weights()
-            self.dqn.q_network.load_state_dict(optimal_weights)
-            self.optimal_policy_loaded = True
 
 
 # The Network class inherits the torch.nn.Module class, which represents a neural network.
@@ -211,6 +208,7 @@ class Network(torch.nn.Module):
         self.layer_1 = torch.nn.Linear(
             in_features=input_dimension, out_features=100)
         self.layer_2 = torch.nn.Linear(in_features=100, out_features=100)
+        # self.layer_3 = torch.nn.Linear(in_features=100, out_features=100)
         self.output_layer = torch.nn.Linear(
             in_features=100, out_features=output_dimension)
 
@@ -218,6 +216,7 @@ class Network(torch.nn.Module):
     def forward(self, input):
         layer_1_output = torch.nn.functional.relu(self.layer_1(input))
         layer_2_output = torch.nn.functional.relu(self.layer_2(layer_1_output))
+        # layer_3_output = torch.nn.functional.relu(self.layer_3(layer_2_output))
         output = self.output_layer(layer_2_output)
         return output
 
@@ -228,14 +227,14 @@ class DQN:
     # The class initialisation function.
     def __init__(self):
         # Create a Q-network, which predicts the q-value for a particular state.
-        self.q_network = Network(input_dimension=2, output_dimension=4)
+        self.q_network = Network(input_dimension=3, output_dimension=1)
         # Define the optimiser which is used when updating the Q-network. The learning rate determines how big each gradient step is during backpropagation.
         self.optimiser = torch.optim.Adam(
             self.q_network.parameters(), lr=0.005)
         # Replay buffer
         self.replay_buffer = ReplayBuffer()
         # Target network
-        self.target_q_network = Network(input_dimension=2, output_dimension=4)
+        self.target_q_network = Network(input_dimension=3, output_dimension=1)
         # Discount factor
         self.discount_factor = 0.9
 
@@ -258,17 +257,19 @@ class DQN:
         return loss.item()
 
     def _calculate_long_run_loss(self, batch):
-        s, a, r, s_p = batch
-        predicted_rewards = self.q_network.forward(torch.tensor(s))
-        prediction_tensor = torch.gather(predicted_rewards, 1, torch.tensor(a))
+        s_a, r, s_p = batch
+        prediction_tensor = self.q_network.forward(torch.tensor(s_a))
+
+        actions = []
+        for s in s_p:
+            actions.append(self.find_best_action(s))
+
+        actions = np.array(actions).reshape(-1, 1)
+        s_p_a = np.hstack((s_p, actions)).astype(np.float32)
 
         # bellman equation
-        predicted_rewards_prime = self.target_q_network.forward(
-            torch.tensor(s_p)).detach()
-        max_actions = np.argmax(
-            predicted_rewards_prime.detach().numpy(), axis=1).reshape(-1, 1)
-        state_prime_tensor = torch.gather(
-            predicted_rewards_prime, 1, torch.tensor(max_actions)).detach()
+        state_prime_tensor = self.target_q_network.forward(
+            torch.tensor(s_p_a)).detach()
 
         expected_value = r + self.discount_factor * state_prime_tensor.data.numpy()
         return torch.nn.MSELoss()(torch.tensor(expected_value), prediction_tensor)
@@ -277,12 +278,37 @@ class DQN:
         weights = self.q_network.state_dict()
         self.target_q_network.load_state_dict(weights)
 
+    # Estimate the best action for this state
+    def find_best_action(self, state, n=5, k=3):
+        sample = np.linspace(
+            start=0,
+            stop=2*np.pi,
+            num=n
+        )
+        for _ in range(3):
+            s_a = np.hstack(
+                (np.repeat(state.reshape(1, -1), n, axis=0).reshape(n, 2),
+                 sample.reshape(-1, 1))
+            ).astype(np.float32)
+            vals = self.q_network.forward(
+                torch.tensor(s_a)
+            ).detach().numpy().squeeze()
+            best_idx = vals.argsort()[-k:][::-1]
+            actions = sample[best_idx]
+            mean, std = np.mean(actions), np.std(actions)
+            sample = np.random.normal(
+                loc=mean,
+                scale=std,
+                size=n
+            )
+        return mean
+
 
 class ReplayBuffer:
 
     def __init__(self):
-        self.buffer = collections.deque(maxlen=10000)
-        self.sample_size = 200
+        self.buffer = collections.deque(maxlen=20000)
+        self.sample_size = 50
 
     def size(self):
         return len(self.buffer)
@@ -298,24 +324,22 @@ class ReplayBuffer:
         sample_idx = np.random.choice(
             np.arange(buffer_size), size=self.sample_size, replace=False)
 
-        states = []
-        actions = []
+        state_actions = []
         rewards = []
         states_prime = []
 
         for idx in sample_idx:
             s, a, r, s_p = self.buffer[idx]
-            states.append(s)
-            actions.append(a)
+            s_a = np.array([s[0], s[1], a], dtype=np.float32)
+            state_actions.append(s_a)
             rewards.append(r)
             states_prime.append(s_p)
 
-        states = np.array(states, dtype=np.float32)
+        state_actions = np.array(state_actions, dtype=np.float32)
         rewards = np.array(rewards, dtype=np.float64).reshape(-1, 1)
-        actions = np.array(actions, dtype=np.int64).reshape(-1, 1)
         states_prime = np.array(states_prime, dtype=np.float32)
 
-        return states, actions, rewards, states_prime
+        return state_actions, rewards, states_prime
 
 
 # Takes care to save the weights when network reaches goal with minimal amount of steps
@@ -336,5 +360,5 @@ class NetworkGreedyPolicySnapshotManager:
     def get_min_steps_to_goal(self):
         return self.min_steps_to_goal
 
-    def stores_snapshot(self):
+    def has_snapshot(self):
         return self.has_snapshot
