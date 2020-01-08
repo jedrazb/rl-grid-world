@@ -1,21 +1,5 @@
-############################################################################
-############################################################################
-# THIS IS THE ONLY FILE YOU SHOULD EDIT
-#
-#
-# Agent must always have these five functions:
-#     __init__(self)
-#     has_finished_episode(self)
-#     get_next_action(self, state)
-#     set_next_state_and_distance(self, next_state, distance_to_goal)
-#     get_greedy_action(self, state)
-#
-#
-# You may add any other functions as you wish
-############################################################################
-############################################################################
-
 import collections
+from multiprocessing import Pool
 
 import numpy as np
 import torch
@@ -41,8 +25,8 @@ class Agent:
         # Action is expressed in radians, step size constant
         # to minimize the steps taken to reach the goal
         self.step_size = 0.02
-        self.action_space_start = 0
-        self.action_space_end = 2 * np.pi
+        self.action_space_start = -0.5 * np.pi
+        self.action_space_end = 0.5 * np.pi
         # Parameters for epsilon-greedy exploration
         self.epsilon = 1
         self.delta = 0.0002
@@ -51,6 +35,8 @@ class Agent:
         # When greedy policy works save it
         self.snapshot_manager = NetworkGreedyPolicySnapshotManager()
         self.optimal_policy_loaded = False
+
+        self.min_dist_to_goal = 1.0
 
         # debug flag
         self.debug = True
@@ -87,7 +73,7 @@ class Agent:
         if self.evaluation_mode:
             return self.get_greedy_action_for_evaluation(state)
 
-        if self.num_steps_taken > 2000 and self.episodes % 20 == 0:
+        if self.num_steps_taken > 2000 and self.episodes % 10 == 0:
             self._decrease_episode_length(delta=50)
 
         # Store the state; this will be used later, when storing the transition
@@ -102,6 +88,10 @@ class Agent:
 
     # Function to set the next state and distance, which resulted from applying action self.action at state self.state
     def set_next_state_and_distance(self, next_state, distance_to_goal):
+        if self.min_dist_to_goal > distance_to_goal:
+            self.min_dist_to_goal = distance_to_goal
+            print(distance_to_goal)
+
         # Don't train the network when evaluating it
         if self.evaluation_mode:
             if distance_to_goal < 0.03:
@@ -144,22 +134,18 @@ class Agent:
             reward *= 1.5
 
         if not np.any(self.state - next_state):
-            reward /= 1.5
+            reward = -0.5
         return reward
 
     # Function to get the greedy action for a particular state
     def get_greedy_action(self, state):
-        if not self.optimal_policy_loaded:
-            optimal_weights = self.snapshot_manager.get_optimal_weights()
-            self.dqn.q_network.load_state_dict(optimal_weights)
-            self.optimal_policy_loaded = True
-
-        best_action = self.dqn.find_best_action(state)
+        self._load_snapshot_state()
+        best_action = self.dqn.find_best_action(state, 10, 5)
         return self._action_to_cartesian(best_action)
 
     # Function to get the greedy action for a particular state when evaluating stuff
     def get_greedy_action_for_evaluation(self, state):
-        best_action = self.dqn.find_best_action(state)
+        best_action = self.dqn.find_best_action(state, 10, 5)
         return self._action_to_cartesian(best_action)
 
     def random_action(self):
@@ -179,6 +165,8 @@ class Agent:
     def _action_to_cartesian(self, action):
         radians = action
         x = np.cos(radians)
+        if x < 0:
+            print('error')
         y = np.sin(radians)
         return np.array([x, y], dtype=np.float32) * self.step_size
 
@@ -195,6 +183,12 @@ class Agent:
             self.num_steps_taken > 2500,
             self.episodes % 5 == 0
         ])
+
+    def _load_snapshot_state(self):
+        if not self.optimal_policy_loaded and self.snapshot_manager.stores_snapshot():
+            optimal_weights = self.snapshot_manager.get_optimal_weights()
+            self.dqn.q_network.load_state_dict(optimal_weights)
+            self.optimal_policy_loaded = True
 
 
 # The Network class inherits the torch.nn.Module class, which represents a neural network.
@@ -221,7 +215,10 @@ class Network(torch.nn.Module):
         return output
 
 
+import time
 # The DQN class determines how to train the above neural network.
+
+
 class DQN:
 
     # The class initialisation function.
@@ -237,6 +234,13 @@ class DQN:
         self.target_q_network = Network(input_dimension=3, output_dimension=1)
         # Discount factor
         self.discount_factor = 0.9
+        # Thread pool to speed up the loss calculation
+        self.pool = Pool(4)
+
+    def __getstate__(self):
+        self_dict = self.__dict__.copy()
+        del self_dict['pool']
+        return self_dict
 
     # Function that is called whenever we want to train the Q-network. Each call to this function takes in a transition tuple containing the data we use to update the Q-network.
     def train_q_network(self):
@@ -260,10 +264,11 @@ class DQN:
         s_a, r, s_p = batch
         prediction_tensor = self.q_network.forward(torch.tensor(s_a))
 
-        actions = []
-        for s in s_p:
-            actions.append(self.find_best_action(s))
+        # actions = []
+        # for s in s_p:
+        #     actions.append(self.find_best_action(s))
 
+        actions = self.pool.map(self.find_best_action, s_p)
         actions = np.array(actions).reshape(-1, 1)
         s_p_a = np.hstack((s_p, actions)).astype(np.float32)
 
@@ -280,9 +285,11 @@ class DQN:
 
     # Estimate the best action for this state
     def find_best_action(self, state, n=5, k=3):
+        low = -0.5 * np.pi
+        high = 0.5 * np.pi
         sample = np.linspace(
-            start=0,
-            stop=2*np.pi,
+            start=-0.5 * np.pi,
+            stop=0.5 * np.pi,
             num=n
         )
         for _ in range(3):
@@ -301,14 +308,14 @@ class DQN:
                 scale=std,
                 size=n
             )
-        return mean
+        return max(min(mean, high), low)
 
 
 class ReplayBuffer:
 
     def __init__(self):
         self.buffer = collections.deque(maxlen=20000)
-        self.sample_size = 50
+        self.sample_size = 20
 
     def size(self):
         return len(self.buffer)
@@ -360,5 +367,5 @@ class NetworkGreedyPolicySnapshotManager:
     def get_min_steps_to_goal(self):
         return self.min_steps_to_goal
 
-    def has_snapshot(self):
+    def stores_snapshot(self):
         return self.has_snapshot

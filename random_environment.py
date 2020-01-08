@@ -1,12 +1,3 @@
-############################################################################
-############################################################################
-#
-# YOU SHOULD NOT EDIT THIS FILE OR IMPORT IT INTO YOUR AGENT FILE
-#
-############################################################################
-############################################################################
-
-
 import numpy as np
 import cv2
 
@@ -22,7 +13,8 @@ class Environment:
         self.width = 1.0
         self.height = 1.0
         # Create an image which will be used to display the environment
-        self.image = np.zeros([int(self.magnification * self.height), int(self.magnification * self.width), 3], dtype=np.uint8)
+        self.image = np.zeros([int(self.magnification * self.height),
+                               int(self.magnification * self.width), 3], dtype=np.uint8)
         # Define the space of the environment
         self.init_state = None
         self.free_blocks = None
@@ -34,7 +26,8 @@ class Environment:
         # Set the initial state of the agent
         init_state_x = 0.05
         init_state_y = np.random.uniform(0.05, 0.95)
-        self.init_state = np.array([init_state_x, init_state_y], dtype=np.float32)
+        self.init_state = np.array(
+            [init_state_x, init_state_y], dtype=np.float32)
         # Create an empty list of free blocks
         self.free_blocks = []
         # Create the first free space block
@@ -58,8 +51,10 @@ class Environment:
                 block_bottom_min = prev_bottom - (block_height - 0.05)
                 block_bottom_mid = 0.5 * (block_bottom_min + block_bottom_max)
                 block_bottom_half_range = block_bottom_max - block_bottom_mid
-                r1 = np.random.uniform(-block_bottom_half_range, block_bottom_half_range)
-                r2 = np.random.uniform(-block_bottom_half_range, block_bottom_half_range)
+                r1 = np.random.uniform(-block_bottom_half_range,
+                                       block_bottom_half_range)
+                r2 = np.random.uniform(-block_bottom_half_range,
+                                       block_bottom_half_range)
                 if np.fabs(r1) > np.fabs(r2):
                     block_bottom = block_bottom_mid + r1
                 else:
@@ -92,7 +87,8 @@ class Environment:
         block = (top_left, bottom_right)
         self.free_blocks.append(block)
         # Set the goal state
-        self.goal_state = np.array([0.95, np.random.uniform(block_bottom + 0.01, block_top - 0.01)], dtype=np.float32)
+        self.goal_state = np.array([0.95, np.random.uniform(
+            block_bottom + 0.01, block_top - 0.01)], dtype=np.float32)
 
     # Function to reset the environment, which is done at the start of each episode
     def reset(self):
@@ -128,19 +124,26 @@ class Environment:
         self.image.fill(100)
         # Draw all the free blocks, representing the free space
         for block in self.free_blocks:
-            top_left = (int(self.magnification * block[0][0]), int(self.magnification * (1 - block[0][1])))
-            bottom_right = (int(self.magnification * block[1][0]), int(self.magnification * (1 - block[1][1])))
-            cv2.rectangle(self.image, top_left, bottom_right, (0, 0, 0), thickness=cv2.FILLED)
+            top_left = (int(self.magnification *
+                            block[0][0]), int(self.magnification * (1 - block[0][1])))
+            bottom_right = (int(
+                self.magnification * block[1][0]), int(self.magnification * (1 - block[1][1])))
+            cv2.rectangle(self.image, top_left, bottom_right,
+                          (0, 0, 0), thickness=cv2.FILLED)
         # Draw the agent
-        agent_centre = (int(agent_state[0] * self.magnification), int((1 - agent_state[1]) * self.magnification))
+        agent_centre = (int(agent_state[0] * self.magnification),
+                        int((1 - agent_state[1]) * self.magnification))
         agent_radius = int(0.01 * self.magnification)
         agent_colour = (0, 0, 255)
-        cv2.circle(self.image, agent_centre, agent_radius, agent_colour, cv2.FILLED)
+        cv2.circle(self.image, agent_centre,
+                   agent_radius, agent_colour, cv2.FILLED)
         # Draw the goal
-        goal_centre = (int(self.goal_state[0] * self.magnification), int((1 - self.goal_state[1]) * self.magnification))
+        goal_centre = (int(self.goal_state[0] * self.magnification),
+                       int((1 - self.goal_state[1]) * self.magnification))
         goal_radius = int(0.01 * self.magnification)
         goal_colour = (0, 255, 0)
-        cv2.circle(self.image, goal_centre, goal_radius, goal_colour, cv2.FILLED)
+        cv2.circle(self.image, goal_centre,
+                   goal_radius, goal_colour, cv2.FILLED)
         # Show the image
         cv2.imshow("Environment", self.image)
         # This line is necessary to give time for the image to be rendered on the screen

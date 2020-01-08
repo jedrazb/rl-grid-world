@@ -56,6 +56,7 @@ class Agent:
 
         # debug flag
         self.debug = False
+        self.debug_optimal_policy = True
 
     # Function to check whether the agent has reached the end of an episode
     def has_finished_episode(self):
@@ -63,6 +64,8 @@ class Agent:
             self.episodes += 1
             # Make sure you finish the evaluation
             self.evaluation_mode = False
+            # Make sure that the model will be training
+            self.dqn.q_network.train()
             return True
         else:
             return False
@@ -81,6 +84,7 @@ class Agent:
         # Periodically evaluate the policy
         if self._should_evaluate_policy():
             self.evaluation_mode = True
+            self.dqn.q_network.eval()
 
         # Update the number of steps which the agent has taken
         self.num_steps_taken += 1
@@ -89,13 +93,16 @@ class Agent:
         if self.evaluation_mode:
             return self.get_greedy_action_for_evaluation(state)
 
-        if self.num_steps_taken > 10000 and self.episodes % 50 == 0:
+        # Decrease the episode length so that it converges to 100
+        if self.num_steps_taken > 10000 and self.episodes % 10 == 0 and self.num_steps_taken % self.episode_length == 1:
             self.decrease_episode_length(delta=25)
 
         # Store the state; this will be used later, when storing the transition
         self.state = state
-        # Here, the action is random, but you can change this
+
+        # Make action
         action = self.e_greedy_action()
+
         # Get the continuous action
         continuous_action = self._discrete_action_to_continuous(action)
         # Store the action; this will be used later, when storing the transition
@@ -106,18 +113,29 @@ class Agent:
     def set_next_state_and_distance(self, next_state, distance_to_goal):
         # Don't train the network when evaluating it
         if self.evaluation_mode:
+            # If there is no solution reaching the goal, preserve the one which minimises
+            # the end distance to goal
+            if self.snapshot_manager.min_steps_to_goal == 1000:
+                self.snapshot_manager.preserve_weights_minimising_distance_if_didnt_reach_goal(
+                    distance=distance_to_goal,
+                    weights=self.dqn.q_network.state_dict()
+                )
+
+            # otherwise consider only the solutions which reach the goal
             if distance_to_goal < 0.03:
                 steps = self.num_steps_taken % self.episode_length
                 steps_taken = steps if steps != 0 else self.episode_length
+                steps_taken -= 1
                 if steps_taken < self.snapshot_manager.get_min_steps_to_goal():
                     weights = self.dqn.q_network.state_dict()
                     self.snapshot_manager.preserve_weights(
                         num_steps=steps_taken,
                         weights=weights
                     )
-                    print('Greedy policy works! Reached goal in {} steps.'.format(
-                        steps_taken
-                    ))
+                    if self.debug_optimal_policy:
+                        print('Greedy policy works! Reached goal in {} steps.'.format(
+                            steps_taken
+                        ))
             return
 
         # Convert the distance to a reward
@@ -190,7 +208,8 @@ class Agent:
         return all([
             self.episode_length == 100,
             self.num_steps_taken > 15000,
-            self.episodes % 10 == 0
+            self.episodes % 10 == 0,
+            self.num_steps_taken % self.episode_length == 0
         ])
 
     def _load_snapshot_state(self):
@@ -198,6 +217,7 @@ class Agent:
             optimal_weights = self.snapshot_manager.get_optimal_weights()
             self.dqn.q_network.load_state_dict(optimal_weights)
             self.optimal_policy_loaded = True
+            self.dqn.q_network.eval()
 
 
 # The Network class inherits the torch.nn.Module class, which represents a neural network.
@@ -258,7 +278,7 @@ class DQN:
         return loss.item()
 
     def _calculate_long_run_loss(self, batch):
-        s, a, r, s_p = batch
+        s, a, r, s_p, idx = batch
         predicted_rewards = self.q_network.forward(torch.tensor(s))
         prediction_tensor = torch.gather(predicted_rewards, 1, torch.tensor(a))
 
@@ -271,6 +291,11 @@ class DQN:
             predicted_rewards_prime, 1, torch.tensor(max_actions)).detach()
 
         expected_value = r + self.discount_factor * state_prime_tensor.data.numpy()
+        idx_to_update = idx[(expected_value > np.mean(
+            expected_value, axis=0) + np.std(expected_value, axis=0)).squeeze()]
+
+        self.replay_buffer.update_weights(idx_to_update)
+
         return torch.nn.MSELoss()(torch.tensor(expected_value), prediction_tensor)
 
     def update_target_network(self):
@@ -283,6 +308,8 @@ class ReplayBuffer:
     def __init__(self):
         self.buffer = collections.deque(maxlen=10000)
         self.sample_size = 200
+        self.p = collections.deque(maxlen=10000)
+        self.min_p = 0.05
 
     def size(self):
         return len(self.buffer)
@@ -292,11 +319,18 @@ class ReplayBuffer:
 
     def add(self, transition):
         self.buffer.appendleft(transition)
+        self.p.appendleft(self.min_p)
+
+    def update_weights(self, idx):
+        for i in idx:
+            self.p[i] = self.min_p * 2
 
     def random_sample(self):
         buffer_size = self.size()
+        prob = np.array(self.p)
+        prob = prob / np.sum(prob)
         sample_idx = np.random.choice(
-            np.arange(buffer_size), size=self.sample_size, replace=False)
+            np.arange(buffer_size), size=self.sample_size, replace=False, p=prob)
 
         states = []
         actions = []
@@ -315,19 +349,23 @@ class ReplayBuffer:
         actions = np.array(actions, dtype=np.int64).reshape(-1, 1)
         states_prime = np.array(states_prime, dtype=np.float32)
 
-        return states, actions, rewards, states_prime
+        return states, actions, rewards, states_prime, sample_idx
 
 
 # Takes care to save the weights when network reaches goal with minimal amount of steps
 class NetworkGreedyPolicySnapshotManager:
     def __init__(self):
-        self.min_steps_to_goal = 100
+        self.min_steps_to_goal = 1000  # magic number, assume 100 or less steps in testing
+        self.min_distance_to_goal = 1
         self.weights = None
-        self.has_snapshot = False
 
     def preserve_weights(self, num_steps, weights):
-        if num_steps < self.min_steps_to_goal:
-            self.min_steps_to_goal = num_steps
+        self.min_steps_to_goal = num_steps
+        self.weights = weights
+
+    def preserve_weights_minimising_distance_if_didnt_reach_goal(self, distance, weights):
+        if distance < self.min_distance_to_goal and self.min_steps_to_goal == 1000:
+            self.min_distance_to_goal = distance
             self.weights = weights
 
     def get_optimal_weights(self):
@@ -337,4 +375,4 @@ class NetworkGreedyPolicySnapshotManager:
         return self.min_steps_to_goal
 
     def stores_snapshot(self):
-        return self.has_snapshot
+        return self.weights is not None
